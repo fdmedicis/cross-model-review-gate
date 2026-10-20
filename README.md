@@ -184,6 +184,9 @@ OpenAI-compatible client; Copilot runs through the official Copilot CLI.
   choice, and accepts an automatic choice only when the CLI's own event log shows a
   non-Claude model answered. `meta.model` records which model reviewed. Each review
   uses one Copilot premium request.
+- The Copilot CLI masks password-like values (`******`) in files before its model reads
+  them, even obvious placeholders. The reviewer may then call such a line unverifiable.
+  The gate's own secret scan runs before any provider and is not affected.
 - Copilot needs a fine-grained personal access token with the **Copilot Requests**
   permission, stored as `COPILOT_GITHUB_TOKEN`. The CLI runs in an empty temp
   directory with only the `read` tool allowed, and does not see other providers'
