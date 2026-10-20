@@ -18,7 +18,10 @@ _DIFF_FLAGS = ["--no-color", "--no-ext-diff", "-M"]
 
 
 def git(repo: str, *args: str, binary: bool = False, check: bool = True):
-    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, check=False)
+    # stdin=DEVNULL matters: inside an MCP stdio server the inherited stdin is the
+    # protocol pipe, and on Windows a child touching it can block forever.
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, check=False,
+                       stdin=subprocess.DEVNULL)
     if check and r.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {r.stderr.decode('utf-8', 'replace').strip()}")
     return r.stdout if binary else r.stdout.decode("utf-8", "replace")
@@ -71,7 +74,7 @@ def diff_worktree(repo: str, base: str) -> str:
     untracked = [p for p in git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if p]
     for path in untracked:
         r = subprocess.run(["git", "-C", repo, "diff", *_DIFF_FLAGS, "--no-index", "--", os.devnull, path],
-                           capture_output=True)
+                           capture_output=True, stdin=subprocess.DEVNULL)
         # --no-index exits 1 when files differ, which is the normal case here.
         chunk = r.stdout.decode("utf-8", "replace")
         out += chunk.replace(f"a/{os.devnull}", f"a/{path}").replace(f"b/{os.devnull}", f"b/{path}")

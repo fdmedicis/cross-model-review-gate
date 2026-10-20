@@ -299,8 +299,11 @@ def _copilot_call(p, model, system, user, images, timeout):
             cmd = [exe, "-p", _COPILOT_INSTRUCTION, "--no-ask-user", "--output-format=json",
                    f"--model={m}", *_COPILOT_LEAN_FLAGS, *attachments]
             try:
+                # stdin=DEVNULL: the CLI reads piped stdin as extra prompt, and inside an
+                # MCP stdio server the inherited stdin is the protocol pipe.
                 r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
-                                   errors="replace", timeout=timeout, env=env)
+                                   errors="replace", timeout=timeout, env=env,
+                                   stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired as e:
                 raise ProviderError(f"Copilot CLI timed out after {timeout}s (model {m})") from e
             out = (r.stderr or "") + (r.stdout or "")
