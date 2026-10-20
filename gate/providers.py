@@ -209,6 +209,56 @@ _COPILOT_INSTRUCTION = (
 )
 
 
+COPILOT_MODELS_URL = "https://api.githubcopilot.com/models"
+
+
+def copilot_catalog(token: str, timeout: int = 20) -> list[dict] | None:
+    """The models this Copilot account can see, with their policy state.
+
+    Returns [{"id", "vendor", "state", "chat"}] or None when the list cannot be read
+    (the caller then falls back to trying models one by one)."""
+    if not token:
+        return None
+    req = urllib.request.Request(COPILOT_MODELS_URL, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/json",
+        "Copilot-Integration-Id": "copilot-developer-cli", "User-Agent": "cross-model-review-gate"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+    items = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return None
+    out = []
+    for m in items:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        caps = m.get("capabilities") or {}
+        out.append({"id": str(m["id"]), "vendor": str(m.get("vendor") or ""),
+                    "state": str((m.get("policy") or {}).get("state") or "enabled"),
+                    "chat": (caps.get("type") in (None, "chat")) if isinstance(caps, dict) else True})
+    return out
+
+
+def _is_claude(model_id: str, vendor: str = "") -> bool:
+    return "claude" in model_id.lower() or "anthropic" in vendor.lower()
+
+
+def _copilot_candidates(p, model, explicit, catalog):
+    """Order the models to try. With a catalog, only models the account has enabled."""
+    if explicit:
+        return [model]
+    preferred = [model, *p.fallback_models]
+    if catalog is None:
+        return preferred
+    enabled = [m for m in catalog if m["chat"] and m["state"] == "enabled" and not _is_claude(m["id"], m["vendor"])]
+    ids = [m["id"] for m in enabled]
+    ordered = [m for m in preferred if m in ids]
+    ordered += [i for i in ids if i not in ordered and i != "auto"]   # anything else non-Claude
+    return ordered
+
+
 def _copilot_call(p, model, system, user, images, timeout):
     exe = shutil.which("copilot")
     if not exe:
@@ -222,8 +272,14 @@ def _copilot_call(p, model, system, user, images, timeout):
                           f"and pass it to the gate in the caller workflow.")
     # The default model falls back through the plan-dependent list; an explicit model does not.
     explicit = bool(os.environ.get("REVIEW_GATE_MODEL")) or model != p.default_model
-    candidates = [model] if explicit else [model, *p.fallback_models]
-    candidates = [m for m in candidates if "claude" not in m.lower()]
+    catalog = None if explicit else copilot_catalog(os.environ.get(p.key_env, "").strip())
+    candidates = [m for m in _copilot_candidates(p, model, explicit, catalog) if not _is_claude(m)]
+    if not candidates:
+        states = ", ".join(f"{m['id']} ({m['state']})" for m in (catalog or [])
+                           if m["chat"] and not _is_claude(m["id"], m["vendor"])) or "none listed"
+        raise ConfigError("this Copilot account has no non-Claude chat model enabled. Models it can see: "
+                          + states + ". Enable one at https://github.com/settings/copilot, "
+                          "or set the `model` input.")
 
     # The CLI sees only what it needs: no other provider's key, and not the
     # workflow's GITHUB_TOKEN (which it would otherwise fall back to).
@@ -256,10 +312,13 @@ def _copilot_call(p, model, system, user, images, timeout):
                 raise ProviderError(f"Copilot CLI timed out after {timeout}s (model {m})") from e
             out = (r.stderr or "") + (r.stdout or "")
             if r.returncode == 0:
-                return r.stdout, {"usage": None, "model_used": m, "models_unavailable": unavailable}
+                return r.stdout, {"usage": None, "model_used": m, "models_unavailable": unavailable,
+                                  "catalog_read": catalog is not None}
             if "not available" in out.lower():
                 unavailable.append(m)       # not on this plan: try the next model
                 continue
             raise ProviderError(f"Copilot CLI exited with {r.returncode} (model {m}): {out.strip()[-900:]}")
+    seen = ("; catalog says: " + ", ".join(f"{c['id']} ({c['state']})" for c in catalog if c["chat"])
+            if catalog else "; the model catalog could not be read")
     raise ConfigError("none of these models is available on this Copilot plan: " + ", ".join(unavailable)
-                      + ". Set the `model` input to one your plan includes (not a Claude model).")
+                      + seen + ". Set the `model` input to one your plan includes (not a Claude model).")

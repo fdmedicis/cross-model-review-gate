@@ -177,11 +177,25 @@ class Providers(unittest.TestCase):
                                                stderr="" if ok else f'Error: Model "{model}" is not available.')
         env = {"GITHUB_ACTIONS": "", "REVIEW_GATE_MODEL": ""}
         with mock.patch.dict(os.environ, env), mock.patch.object(providers.shutil, "which", return_value="copilot"), \
+                mock.patch.object(providers, "copilot_catalog", return_value=None), \
                 mock.patch.object(providers.subprocess, "run", side_effect=fake_run):
             _, meta = providers.call(p, m, "s", "u")
         self.assertEqual(calls, [p.default_model, *p.fallback_models[:2]])
         self.assertEqual(meta["model_used"], p.fallback_models[1])
         self.assertFalse(any("claude" in c for c in calls))
+
+    def test_copilot_candidates_from_catalog(self):
+        p, m = providers.resolve("copilot", None)
+        catalog = [
+            {"id": "claude-sonnet-5", "vendor": "Anthropic", "state": "enabled", "chat": True},
+            {"id": p.fallback_models[0], "vendor": "OpenAI", "state": "unconfigured", "chat": True},
+            {"id": "gpt-5-mini", "vendor": "OpenAI", "state": "enabled", "chat": True},
+            {"id": "some-new-model", "vendor": "Other", "state": "enabled", "chat": True},
+            {"id": "text-embedding-4", "vendor": "OpenAI", "state": "enabled", "chat": False},
+        ]
+        got = providers._copilot_candidates(p, m, False, catalog)
+        self.assertEqual(got, ["gpt-5-mini", "some-new-model"])   # enabled, non-Claude, preferred first
+        self.assertEqual(providers._copilot_candidates(p, m, False, None)[0], p.default_model)
 
     def test_copilot_explicit_model_does_not_fall_back(self):
         p, _ = providers.resolve("copilot", None)
