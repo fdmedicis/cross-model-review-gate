@@ -88,6 +88,12 @@ class Secrets(unittest.TestCase):
     def test_redaction(self):
         self.assertNotIn("Q7XW", checks.redact_secrets("id AKIA" + "Q7XW2M9KLP4ZT3RB end"))
 
+    def test_redaction_leaves_placeholders(self):
+        # Found by the first live eval: redacting a placeholder made the reviewer suspect a secret.
+        text = 'PASSWORD="changeme-please"\nAPI_TOKEN="your-token-here"'
+        self.assertEqual(checks.redact_secrets(text), text)
+        self.assertIn("REDACTED", checks.redact_secrets('password = "' + "S3cure!" * 3 + '"'))
+
 
 class RiskAndBranch(unittest.TestCase):
     def test_risk_signals(self):
