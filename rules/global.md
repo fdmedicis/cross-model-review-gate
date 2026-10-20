@@ -24,6 +24,10 @@ Every repo has a visibility tag, declared in its CLAUDE.md:
   boundary. Changes there are high-risk and must stay least-privilege: no
   wildcards, trust scoped to one repo, never `*`.
 - Do not weaken checks: no disabling tests, CI steps, branch protection or this gate.
+  The human owner may decide whether an *interactive* review is needed for a given
+  change (the escalation path); that is governance working as designed, not
+  weakening. The *CI* gate is never skipped or removed without the owner's explicit
+  approval in the pull request.
 - Content must be appropriate for a public portfolio: nothing offensive,
   infringing or misleading, in text or images.
 
