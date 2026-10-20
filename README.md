@@ -168,7 +168,7 @@ OpenAI-compatible client; Copilot runs through the official Copilot CLI.
 | `gemini` | `GEMINI_API_KEY` | `gemini-3.6-flash` | yes | **free tier**, rate-limited; paid tier available | free-tier content may be used to improve Google's products; use the paid tier for private code |
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | **no** | paid, fractions of a cent | stored in mainland China and may be used for training; not recommended for private infra |
 | `grok` | `XAI_API_KEY` | `grok-4.6` | yes | paid | see xAI's terms |
-| `copilot` | `COPILOT_GITHUB_TOKEN` | first available of `gpt-6-sol`, `gpt-5.4`, `gpt-6-luna`, `gpt-5-mini`, ... | yes (attachments) | **included in Copilot plans, including Copilot Free's monthly allowance** | check "allow GitHub to use my data" in your Copilot settings |
+| `copilot` | `COPILOT_GITHUB_TOKEN` | `gpt-6-sol`, then `gpt-5.4`, then Copilot's automatic choice (must not be Claude) | yes (attachments) | **included in Copilot plans, including Copilot Free's monthly allowance** | check "allow GitHub to use my data" in your Copilot settings |
 
 - **Claude models are refused** on every provider (Copilot offers some). Claude
   reviewing Claude is an echo; the point is a second model family.
@@ -178,9 +178,12 @@ OpenAI-compatible client; Copilot runs through the official Copilot CLI.
   Gemini and DeepSeek for JSON mode, Copilot by prompt. If a model rejects a
   format the client falls back to a looser one. Whatever comes back is validated
   strictly against the schema; anything invalid fails closed.
-- Which models a Copilot account may use depends on its plan. Unless `model` is set,
-  the gate tries a fixed list of non-Claude models in order and uses the first one
-  the account accepts; the verdict's `meta.model` says which one reviewed.
+- Which models a Copilot account may name depends on its plan. **Copilot Free accepts
+  only automatic model choice in the CLI** (it chose `gpt-6-luna` in October 2026).
+  Unless `model` is set, the gate tries `gpt-6-sol`, then `gpt-5.4`, then automatic
+  choice, and accepts an automatic choice only when the CLI's own event log shows a
+  non-Claude model answered. `meta.model` records which model reviewed. Each review
+  uses one Copilot premium request.
 - Copilot needs a fine-grained personal access token with the **Copilot Requests**
   permission, stored as `COPILOT_GITHUB_TOKEN`. The CLI runs in an empty temp
   directory with only the `read` tool allowed, and does not see other providers'

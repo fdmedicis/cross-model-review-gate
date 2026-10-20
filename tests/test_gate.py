@@ -165,37 +165,42 @@ class Providers(unittest.TestCase):
                 providers.call(p, m, "s", "u")
         self.assertIn("REPOSITORY secret", str(ctx.exception))
 
-    def test_copilot_falls_back_when_model_not_on_plan(self):
+    @staticmethod
+    def _events(answer, model, auto=False):
+        lines = [{"type": "session.auto_mode_resolved", "data": {"chosenModel": model}}] if auto else []
+        lines.append({"type": "assistant.message", "data": {"phase": "final_answer", "model": model,
+                                                             "content": answer}})
+        return "\n".join(json.dumps(x) for x in lines)
+
+    def _run_copilot(self, auto_model):
+        """Simulate Copilot Free: every named model refused, `auto` answers as auto_model."""
         p, m = providers.resolve("copilot", None)
         calls = []
 
         def fake_run(cmd, **kw):
             model = next(a.split("=", 1)[1] for a in cmd if a.startswith("--model="))
             calls.append(model)
-            ok = model == p.fallback_models[1]
-            return subprocess.CompletedProcess(cmd, 0 if ok else 1, stdout='{"x": 1}' if ok else "",
-                                               stderr="" if ok else f'Error: Model "{model}" is not available.')
+            if model == "auto":
+                return subprocess.CompletedProcess(cmd, 0, stdout=self._events('{"ok": 1}', auto_model, True),
+                                                   stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="",
+                                               stderr=f'Error: Model "{model}" from --model flag is not available.')
         env = {"GITHUB_ACTIONS": "", "REVIEW_GATE_MODEL": ""}
         with mock.patch.dict(os.environ, env), mock.patch.object(providers.shutil, "which", return_value="copilot"), \
-                mock.patch.object(providers, "copilot_catalog", return_value=None), \
                 mock.patch.object(providers.subprocess, "run", side_effect=fake_run):
-            _, meta = providers.call(p, m, "s", "u")
-        self.assertEqual(calls, [p.default_model, *p.fallback_models[:2]])
-        self.assertEqual(meta["model_used"], p.fallback_models[1])
-        self.assertFalse(any("claude" in c for c in calls))
+            answer, meta = providers.call(p, m, "s", "u")
+        return p, calls, answer, meta
 
-    def test_copilot_candidates_from_catalog(self):
-        p, m = providers.resolve("copilot", None)
-        catalog = [
-            {"id": "claude-sonnet-5", "vendor": "Anthropic", "state": "enabled", "chat": True},
-            {"id": p.fallback_models[0], "vendor": "OpenAI", "state": "unconfigured", "chat": True},
-            {"id": "gpt-5-mini", "vendor": "OpenAI", "state": "enabled", "chat": True},
-            {"id": "some-new-model", "vendor": "Other", "state": "enabled", "chat": True},
-            {"id": "text-embedding-4", "vendor": "OpenAI", "state": "enabled", "chat": False},
-        ]
-        got = providers._copilot_candidates(p, m, False, catalog)
-        self.assertEqual(got, ["gpt-5-mini", "some-new-model"])   # enabled, non-Claude, preferred first
-        self.assertEqual(providers._copilot_candidates(p, m, False, None)[0], p.default_model)
+    def test_copilot_free_plan_falls_back_to_auto_and_records_model(self):
+        p, calls, answer, meta = self._run_copilot("gpt-6-luna")
+        self.assertEqual(calls, [p.default_model, *p.fallback_models, "auto"])
+        self.assertEqual(meta["model_used"], "gpt-6-luna")
+        self.assertEqual(answer, '{"ok": 1}')
+
+    def test_copilot_auto_choosing_claude_is_refused(self):
+        with self.assertRaises(providers.ConfigError) as ctx:
+            self._run_copilot("claude-haiku-4.5")
+        self.assertIn("Claude", str(ctx.exception))
 
     def test_copilot_explicit_model_does_not_fall_back(self):
         p, _ = providers.resolve("copilot", None)
