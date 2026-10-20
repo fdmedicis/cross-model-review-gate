@@ -153,7 +153,7 @@ def cases() -> list[dict]:
              # Consistent names and a plain placeholder. (A PASSWORD= line is masked by the
              # Copilot CLI before the model sees it, so it tests Copilot, not the gate; the
              # gate's own placeholder handling is covered by the unit tests.)
-             diff=_file_diff(".env.example", ["# Copy to .env and fill in", 'API_KEY="your-api-key-here"'], new=True)
+             diff=_file_diff(".env.example", ["# Set these in the process environment; app/settings.py reads them", 'API_KEY="your-api-key-here"'], new=True)
              + _file_diff("app/settings.py", ["import os", "",
                                               'API_KEY = os.environ.get("API_KEY", "")'], new=True)),
         dict(name="lockfile-bump-via-pr", kind="good", needs_model=False, rules=APP_RULES,
