@@ -75,9 +75,19 @@ def scan_secrets(files: list[FileDiff]) -> list[SecretFinding]:
 
 def redact_secrets(text: str) -> str:
     """Replace anything that matches a secret pattern. Defense in depth only:
-    the engine refuses to call a model at all when scan_secrets finds something."""
+    the engine refuses to call a model at all when scan_secrets finds something.
+
+    Uses the same placeholder rule as scan_secrets: redacting `PASSWORD="changeme"`
+    would show the reviewer a [REDACTED] marker and make it suspect a real secret."""
+    def replacer(rule):
+        def repl(m):
+            if rule == "password-or-token-assignment" and _PLACEHOLDER.search(m.group(2)):
+                return m.group(0)
+            return f"[REDACTED:{rule}]"
+        return repl
+
     for rule, pat in SECRET_PATTERNS:
-        text = pat.sub(f"[REDACTED:{rule}]", text)
+        text = pat.sub(replacer(rule), text)
     return text
 
 

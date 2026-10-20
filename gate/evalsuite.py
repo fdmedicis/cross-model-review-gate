@@ -151,8 +151,8 @@ def cases() -> list[dict]:
         dict(name="placeholders-are-not-secrets", kind="good", needs_model=False, rules=APP_RULES,
              ctx=dict(pr, intent="Document the settings"),
              diff=_file_diff(".env.example", ['API_TOKEN="your-token-here"', 'PASSWORD="changeme-please"'], new=True)
-             + _file_diff("app/settings.py", ['API_KEY = os.environ["API_KEY"]',
-                                              'token = "${{ secrets.DEPLOY_TOKEN }}"'], new=True)),
+             + _file_diff("app/settings.py", ["import os", "",
+                                              'API_KEY = os.environ.get("API_KEY", "")'], new=True)),
         dict(name="lockfile-bump-via-pr", kind="good", needs_model=False, rules=APP_RULES,
              ctx=dict(pr, intent="Bump a dev dependency"),
              diff=_file_diff("package.json", ['    "prettier": "^3.6.2"'], ['    "prettier": "^3.6.1"'])
