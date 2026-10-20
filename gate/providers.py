@@ -44,6 +44,9 @@ class Provider:
     json_mode: str = "none"   # first response_format to try: json_schema | json_object | none
     vision: bool = False      # can it look at changed images?
     base_url: str = ""
+    # Tried in order when the default model is not on the account's plan. Only used
+    # when no model was set explicitly. Never contains a Claude model.
+    fallback_models: tuple = ()
 
 
 # Default models were current on the providers' pages in October 2026. Model names
@@ -58,8 +61,12 @@ PROVIDERS: dict[str, Provider] = {
                          json_mode="json_object", vision=False, base_url="https://api.deepseek.com"),
     "grok": Provider("grok", "http", "XAI_API_KEY", "grok-4.6",
                      json_mode="json_schema", vision=True, base_url="https://api.x.ai/v1"),
-    "copilot": Provider("copilot", "copilot", "COPILOT_GITHUB_TOKEN", "gpt-5.3-codex",
-                        json_mode="none", vision=True),
+    # Which models a Copilot account may use depends on its plan (Free offers a subset),
+    # so the gate walks this list and uses the first one the account accepts.
+    "copilot": Provider("copilot", "copilot", "COPILOT_GITHUB_TOKEN", "gpt-6-sol",
+                        json_mode="none", vision=True,
+                        fallback_models=("gpt-5.4", "gpt-6-luna", "gpt-5-mini", "gpt-5.4-mini",
+                                         "gpt-5.6-luna", "gemini-3.8-flash", "grok-4.6")),
     # Test double. Refuses to run unless REVIEW_GATE_ALLOW_OFFLINE=1, so it can never
     # silently stand in for a real reviewer in CI.
     "offline": Provider("offline", "offline", "", "offline-stub", vision=True),
@@ -213,31 +220,46 @@ def _copilot_call(p, model, system, user, images, timeout):
         raise ConfigError(f"{p.key_env} is empty in this run. Add it as a REPOSITORY secret under "
                           f"Settings > Secrets and variables > Actions (not an environment secret), "
                           f"and pass it to the gate in the caller workflow.")
+    # The default model falls back through the plan-dependent list; an explicit model does not.
+    explicit = bool(os.environ.get("REVIEW_GATE_MODEL")) or model != p.default_model
+    candidates = [model] if explicit else [model, *p.fallback_models]
+    candidates = [m for m in candidates if "claude" not in m.lower()]
+
+    # The CLI sees only what it needs: no other provider's key, and not the
+    # workflow's GITHUB_TOKEN (which it would otherwise fall back to).
+    hidden = {q.key_env for q in PROVIDERS.values() if q.key_env and q.key_env != p.key_env}
+    hidden.add("GITHUB_TOKEN")
+    if os.environ.get(p.key_env):
+        hidden.add("GH_TOKEN")
+    env = {k: v for k, v in os.environ.items() if k not in hidden}
+
+    unavailable = []
     with tempfile.TemporaryDirectory(prefix="review-gate-") as d:
         # The request goes in a file: a 40k-token diff is far beyond the
         # single-argument limit of a command line.
         with open(os.path.join(d, "review_request.md"), "w", encoding="utf-8") as fh:
             fh.write(system + "\n\n---\n\n" + user)
-        cmd = [exe, "-p", _COPILOT_INSTRUCTION, "-s", "--no-ask-user",
-               f"--model={model}", "--allow-tool=read"]
+        attachments = []
         for i, (path, data) in enumerate(images):
             img = os.path.join(d, f"image_{i}_{os.path.basename(path)}")
             with open(img, "wb") as fh:
                 fh.write(data)
-            cmd.append(f"--attachment={img}")
-        # The CLI sees only what it needs: no other provider's key, and not the
-        # workflow's GITHUB_TOKEN (which it would otherwise fall back to).
-        hidden = {q.key_env for q in PROVIDERS.values() if q.key_env and q.key_env != p.key_env}
-        hidden.add("GITHUB_TOKEN")       # the workflow token never authenticates the reviewer
-        if os.environ.get(p.key_env):
-            hidden.add("GH_TOKEN")
-        env = {k: v for k, v in os.environ.items() if k not in hidden}
-        try:
-            r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=timeout, env=env)
-        except subprocess.TimeoutExpired as e:
-            raise ProviderError(f"Copilot CLI timed out after {timeout}s") from e
-    if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "").strip()[-900:]
-        raise ProviderError(f"Copilot CLI exited with {r.returncode}: {tail}")
-    return r.stdout, {"usage": None}
+            attachments.append(f"--attachment={img}")
+
+        for m in candidates:
+            cmd = [exe, "-p", _COPILOT_INSTRUCTION, "-s", "--no-ask-user",
+                   f"--model={m}", "--allow-tool=read", *attachments]
+            try:
+                r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=timeout, env=env)
+            except subprocess.TimeoutExpired as e:
+                raise ProviderError(f"Copilot CLI timed out after {timeout}s (model {m})") from e
+            out = (r.stderr or "") + (r.stdout or "")
+            if r.returncode == 0:
+                return r.stdout, {"usage": None, "model_used": m, "models_unavailable": unavailable}
+            if "not available" in out.lower():
+                unavailable.append(m)       # not on this plan: try the next model
+                continue
+            raise ProviderError(f"Copilot CLI exited with {r.returncode} (model {m}): {out.strip()[-900:]}")
+    raise ConfigError("none of these models is available on this Copilot plan: " + ", ".join(unavailable)
+                      + ". Set the `model` input to one your plan includes (not a Claude model).")

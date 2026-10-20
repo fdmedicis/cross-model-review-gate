@@ -181,6 +181,8 @@ def review(diff: str, rules: dict | str | None = None, context: dict | None = No
         raw, call_meta = providers.call(p, m, prompt.SYSTEM_PROMPT, user_msg,
                                         images=[(f.path, images[f.path]) for f in budget.images])
         meta.update(call_meta)
+        if call_meta.get("model_used"):
+            meta["model"] = call_meta["model_used"]     # the model that actually reviewed
         parsed = prompt.validate_model_output(prompt.extract_json(raw))
     except (providers.ProviderError, prompt.ModelOutputError) as e:
         meta["decided_by_code"].append("review failed closed")

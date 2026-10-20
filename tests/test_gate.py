@@ -165,6 +165,34 @@ class Providers(unittest.TestCase):
                 providers.call(p, m, "s", "u")
         self.assertIn("REPOSITORY secret", str(ctx.exception))
 
+    def test_copilot_falls_back_when_model_not_on_plan(self):
+        p, m = providers.resolve("copilot", None)
+        calls = []
+
+        def fake_run(cmd, **kw):
+            model = next(a.split("=", 1)[1] for a in cmd if a.startswith("--model="))
+            calls.append(model)
+            ok = model == p.fallback_models[1]
+            return subprocess.CompletedProcess(cmd, 0 if ok else 1, stdout='{"x": 1}' if ok else "",
+                                               stderr="" if ok else f'Error: Model "{model}" is not available.')
+        env = {"GITHUB_ACTIONS": "", "REVIEW_GATE_MODEL": ""}
+        with mock.patch.dict(os.environ, env), mock.patch.object(providers.shutil, "which", return_value="copilot"), \
+                mock.patch.object(providers.subprocess, "run", side_effect=fake_run):
+            _, meta = providers.call(p, m, "s", "u")
+        self.assertEqual(calls, [p.default_model, *p.fallback_models[:2]])
+        self.assertEqual(meta["model_used"], p.fallback_models[1])
+        self.assertFalse(any("claude" in c for c in calls))
+
+    def test_copilot_explicit_model_does_not_fall_back(self):
+        p, _ = providers.resolve("copilot", None)
+        fail = subprocess.CompletedProcess([], 1, stdout="", stderr='Model "gpt-x" is not available.')
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": ""}), \
+                mock.patch.object(providers.shutil, "which", return_value="copilot"), \
+                mock.patch.object(providers.subprocess, "run", return_value=fail) as run:
+            with self.assertRaises(providers.ConfigError):
+                providers.call(p, "gpt-x", "s", "u")
+        self.assertEqual(run.call_count, 1)
+
     def test_missing_key_is_config_error(self):
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
             p, m = providers.resolve("openai", None)
