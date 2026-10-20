@@ -157,6 +157,14 @@ class Providers(unittest.TestCase):
             with self.assertRaises(providers.ConfigError):
                 providers.resolve("offline", None)
 
+    def test_copilot_in_ci_needs_its_own_token(self):
+        p, m = providers.resolve("copilot", None)
+        env = {"GITHUB_ACTIONS": "true", "COPILOT_GITHUB_TOKEN": "", "GITHUB_TOKEN": "workflow-token"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(providers.shutil, "which", return_value="copilot"):
+            with self.assertRaises(providers.ConfigError) as ctx:
+                providers.call(p, m, "s", "u")
+        self.assertIn("REPOSITORY secret", str(ctx.exception))
+
     def test_missing_key_is_config_error(self):
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
             p, m = providers.resolve("openai", None)

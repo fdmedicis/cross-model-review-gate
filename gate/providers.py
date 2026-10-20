@@ -206,6 +206,13 @@ def _copilot_call(p, model, system, user, images, timeout):
     exe = shutil.which("copilot")
     if not exe:
         raise ConfigError("the Copilot CLI is not installed (npm install -g @github/copilot)")
+    # In CI the only usable credential is the PAT. Without it the CLI would fall back to
+    # the workflow's GITHUB_TOKEN, which cannot use a personal Copilot plan, and fail
+    # with a confusing policy error. Locally the CLI may use its own stored login.
+    if os.environ.get("GITHUB_ACTIONS") == "true" and not os.environ.get(p.key_env, "").strip():
+        raise ConfigError(f"{p.key_env} is empty in this run. Add it as a REPOSITORY secret under "
+                          f"Settings > Secrets and variables > Actions (not an environment secret), "
+                          f"and pass it to the gate in the caller workflow.")
     with tempfile.TemporaryDirectory(prefix="review-gate-") as d:
         # The request goes in a file: a 40k-token diff is far beyond the
         # single-argument limit of a command line.
@@ -221,7 +228,9 @@ def _copilot_call(p, model, system, user, images, timeout):
         # The CLI sees only what it needs: no other provider's key, and not the
         # workflow's GITHUB_TOKEN (which it would otherwise fall back to).
         hidden = {q.key_env for q in PROVIDERS.values() if q.key_env and q.key_env != p.key_env}
-        hidden |= {"GITHUB_TOKEN", "GH_TOKEN"} if os.environ.get(p.key_env) else set()
+        hidden.add("GITHUB_TOKEN")       # the workflow token never authenticates the reviewer
+        if os.environ.get(p.key_env):
+            hidden.add("GH_TOKEN")
         env = {k: v for k, v in os.environ.items() if k not in hidden}
         try:
             r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
@@ -229,6 +238,6 @@ def _copilot_call(p, model, system, user, images, timeout):
         except subprocess.TimeoutExpired as e:
             raise ProviderError(f"Copilot CLI timed out after {timeout}s") from e
     if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "").strip()[-400:]
+        tail = (r.stderr or r.stdout or "").strip()[-900:]
         raise ProviderError(f"Copilot CLI exited with {r.returncode}: {tail}")
     return r.stdout, {"usage": None}
