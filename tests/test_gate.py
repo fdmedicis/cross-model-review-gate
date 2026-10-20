@@ -178,12 +178,16 @@ class Providers(unittest.TestCase):
                                                              "content": answer}})
         return "\n".join(json.dumps(x) for x in lines)
 
-    def _run_copilot(self, auto_model):
+    def _run_copilot(self, auto_model, clear_cache=True):
         """Simulate Copilot Free: every named model refused, `auto` answers as auto_model."""
+        if clear_cache:
+            providers._COPILOT_REFUSED.clear()
         p, m = providers.resolve("copilot", None)
         calls = []
+        self.last_cmds = []
 
         def fake_run(cmd, **kw):
+            self.last_cmds.append(cmd)
             model = next(a.split("=", 1)[1] for a in cmd if a.startswith("--model="))
             calls.append(model)
             if model == "auto":
@@ -202,6 +206,15 @@ class Providers(unittest.TestCase):
         self.assertEqual(calls, [p.default_model, *p.fallback_models, "auto"])
         self.assertEqual(meta["model_used"], "gpt-6-luna")
         self.assertEqual(answer, '{"ok": 1}')
+
+    def test_copilot_runs_lean_and_skips_refused_models_next_time(self):
+        p, calls, _, _ = self._run_copilot("gpt-6-luna")
+        for flag in ("--available-tools=view", "--disable-builtin-mcps", "--no-custom-instructions"):
+            self.assertIn(flag, self.last_cmds[-1])
+        _, calls2, _, meta = self._run_copilot("gpt-6-luna", clear_cache=False)
+        self.assertEqual(calls2, ["auto"])          # refused models are not retried in this process
+        self.assertEqual(meta["model_used"], "gpt-6-luna")
+        providers._COPILOT_REFUSED.clear()
 
     def test_copilot_auto_choosing_claude_is_refused(self):
         with self.assertRaises(providers.ConfigError) as ctx:

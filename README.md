@@ -184,6 +184,10 @@ OpenAI-compatible client; Copilot runs through the official Copilot CLI.
   choice, and accepts an automatic choice only when the CLI's own event log shows a
   non-Claude model answered. `meta.model` records which model reviewed. Each review
   uses one Copilot premium request.
+- The Copilot reviewer gets only a file viewer: no GitHub MCP server (so no repo access
+  through the token), no shell, no writes. Copilot Free's automatic choice can differ per
+  review (seen: `gpt-6-luna`, `mai-code-1.1-flash`); it is always checked to be non-Claude
+  and recorded in `meta.model`. A review takes roughly 40-80 seconds.
 - The Copilot CLI masks password-like values (`******`) in files before its model reads
   them, even obvious placeholders. The reviewer may then call such a line unverifiable.
   The gate's own secret scan runs before any provider and is not affected.
