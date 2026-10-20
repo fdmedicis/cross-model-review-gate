@@ -327,6 +327,21 @@ class Git(unittest.TestCase):
         self.assertIn("pic.png", gitlocal.changed_images(self.repo, diff))
         self.assertIn("visibility: private-mine", gitlocal.read_rules(self.repo))
 
+    def test_subprocesses_never_inherit_stdin(self):
+        # Inside an MCP stdio server stdin is the protocol pipe; a git child touching it
+        # hung a real review on Windows. Every subprocess must get DEVNULL.
+        seen = []
+        real = subprocess.run
+
+        def spy(*a, **kw):
+            seen.append(kw.get("stdin"))
+            return real(*a, **kw)
+        Path(self.repo, "new.py").write_text("print('x')\n")
+        with mock.patch.object(gitlocal.subprocess, "run", side_effect=spy):
+            gitlocal.diff_worktree(self.repo, "main")
+        self.assertTrue(seen)
+        self.assertTrue(all(s is subprocess.DEVNULL for s in seen))
+
     def test_unborn_repo_diffs_against_empty_tree(self):
         with tempfile.TemporaryDirectory() as d:
             subprocess.run(["git", "-C", d, "init", "-q", "-b", "main"], check=True)
