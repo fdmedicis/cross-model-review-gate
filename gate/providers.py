@@ -209,6 +209,16 @@ _COPILOT_INSTRUCTION = (
 )
 
 
+# The reviewer reads one request file and answers. It gets only the file viewer:
+# no GitHub MCP server (no repo access through the token), no shell, no writes, and
+# no custom instructions picked up from the working directory. Fewer tools also
+# halves the CLI's start-up and prompt size (about 25 s -> 12 s for a trivial call).
+_COPILOT_LEAN_FLAGS = ("--allow-tool=read", "--available-tools=view",
+                       "--disable-builtin-mcps", "--no-custom-instructions")
+
+_COPILOT_REFUSED: set = set()
+
+
 def _is_claude(model_id: str) -> bool:
     return "claude" in (model_id or "").lower() or "anthropic" in (model_id or "").lower()
 
@@ -259,6 +269,10 @@ def _copilot_call(p, model, system, user, images, timeout):
     explicit = bool(os.environ.get("REVIEW_GATE_MODEL")) or model != p.default_model
     candidates = [model] if explicit else [model, *p.fallback_models, "auto"]
     candidates = [m for m in dict.fromkeys(candidates) if not _is_claude(m)]
+    # Skip models this process already saw refused (a long-lived MCP server reviews
+    # many times; each refusal costs a CLI start-up). Never skip an explicit model.
+    if not explicit:
+        candidates = [m for m in candidates if m not in _COPILOT_REFUSED] or candidates
 
     # The CLI sees only what it needs: no other provider's key, and not the
     # workflow's GITHUB_TOKEN (which it would otherwise fall back to).
@@ -283,7 +297,7 @@ def _copilot_call(p, model, system, user, images, timeout):
 
         for m in candidates:
             cmd = [exe, "-p", _COPILOT_INSTRUCTION, "--no-ask-user", "--output-format=json",
-                   f"--model={m}", "--allow-tool=read", *attachments]
+                   f"--model={m}", *_COPILOT_LEAN_FLAGS, *attachments]
             try:
                 r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
                                    errors="replace", timeout=timeout, env=env)
@@ -293,6 +307,7 @@ def _copilot_call(p, model, system, user, images, timeout):
             if r.returncode != 0:
                 if "not available" in out.lower() and m != "auto":
                     unavailable.append(m)       # not on this plan: try the next one
+                    _COPILOT_REFUSED.add(m)
                     continue
                 raise ProviderError(f"Copilot CLI exited with {r.returncode} (model {m}): {out.strip()[-900:]}")
             answer, used = _parse_copilot_events(r.stdout)
