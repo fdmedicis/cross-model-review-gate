@@ -1,0 +1,21 @@
+# Mode "merge": the gate is a required status check on pull requests.
+# Copy to .github/workflows/review-gate.yml in the protected repo, then make
+# "review-gate / review gate" a required check in a ruleset for the default branch
+# (free on public repos; private repos need GitHub Pro / Team).
+
+name: review-gate
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review-gate:
+    uses: fdmedicis/cross-model-review-gate/.github/workflows/review-gate.yml@v1
+    with:
+      provider: openai # openai | gemini | deepseek | grok | copilot
+      mode: merge
+    secrets: inherit

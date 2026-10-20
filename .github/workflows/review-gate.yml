@@ -1,0 +1,138 @@
+# The CI entry point of the review gate, as a reusable workflow.
+#
+# A protected repo calls it with a few lines (see examples/). It reviews the
+# change with the same engine the MCP tool uses, then:
+#   - fails the job when the verdict is not valid. That failure blocks the merge
+#     (required status check) or the deploy (the deploy job `needs:` this job);
+#   - writes the verdict to the job summary and to the outputs `verdict` / `risk_tier`;
+#   - comments on the pull request (one sticky comment, updated on each push);
+#   - on a push or manual run that is not valid, opens an issue assigned to the
+#     repo owner, so a blocked deploy is never silent.
+
+name: review-gate
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        description: "openai | gemini | deepseek | grok | copilot"
+        type: string
+        default: openai
+      model:
+        description: "Override the provider's default model (empty = default)"
+        type: string
+        default: ""
+      visibility:
+        description: "public | private-mine | shared. Empty = read from the repo's CLAUDE.md"
+        type: string
+        default: ""
+      mode:
+        description: "deploy (the gate guards a deploy job) or merge (a required status check)"
+        type: string
+        default: deploy
+      max_diff_tokens:
+        description: "Size budget. Larger changes fail as too large to review"
+        type: number
+        default: 40000
+      notify:
+        description: "Comment on PRs and open an issue when a deploy is blocked"
+        type: boolean
+        default: true
+      gate_ref:
+        description: "Version of the gate code to run. Keep it equal to the @ref you call this workflow at"
+        type: string
+        default: v1
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+      GEMINI_API_KEY:
+        required: false
+      DEEPSEEK_API_KEY:
+        required: false
+      XAI_API_KEY:
+        required: false
+      COPILOT_GITHUB_TOKEN:
+        required: false
+    outputs:
+      verdict:
+        description: "valid | not-valid"
+        value: ${{ jobs.gate.outputs.verdict }}
+      risk_tier:
+        description: "low | high"
+        value: ${{ jobs.gate.outputs.risk_tier }}
+
+jobs:
+  gate:
+    name: review gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write # sticky verdict comment on PRs
+      issues: write # "deploy blocked" issue for the owner
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+      risk_tier: ${{ steps.review.outputs.risk_tier }}
+    steps:
+      - name: Checkout the change
+        uses: actions/checkout@v7
+        with:
+          path: repo
+          fetch-depth: 0 # both ends of the change must be present
+          persist-credentials: false
+
+      - name: Checkout the gate
+        uses: actions/checkout@v7
+        with:
+          repository: fdmedicis/cross-model-review-gate
+          ref: ${{ inputs.gate_ref }}
+          path: gate-src
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node (Copilot CLI)
+        if: inputs.provider == 'copilot'
+        uses: actions/setup-node@v7
+
+      - name: Install the Copilot CLI
+        if: inputs.provider == 'copilot'
+        run: npm install -g @github/copilot@1
+
+      # Inputs reach the script through env vars, never inlined into the shell,
+      # so a crafted value cannot inject commands.
+      - name: Review
+        id: review
+        working-directory: repo
+        env:
+          PYTHONPATH: ${{ github.workspace }}/gate-src
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          IN_PROVIDER: ${{ inputs.provider }}
+          IN_MODEL: ${{ inputs.model }}
+          IN_VISIBILITY: ${{ inputs.visibility }}
+          IN_MODE: ${{ inputs.mode }}
+          IN_MAX: ${{ inputs.max_diff_tokens }}
+          IN_NOTIFY: ${{ inputs.notify }}
+        run: |
+          args=(ci --provider "$IN_PROVIDER" --mode "$IN_MODE" --max-diff-tokens "$IN_MAX")
+          [ -n "$IN_MODEL" ] && args+=(--model "$IN_MODEL")
+          [ -n "$IN_VISIBILITY" ] && args+=(--visibility "$IN_VISIBILITY")
+          [ "$IN_NOTIFY" = "true" ] || args+=(--no-notify)
+          python -m gate "${args[@]}"
+
+      - name: Keep the verdict
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-gate-verdict
+          path: repo/review-gate-verdict.json
+          if-no-files-found: ignore
+          retention-days: 30

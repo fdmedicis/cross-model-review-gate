@@ -1,0 +1,30 @@
+# Mode "deploy": the gate guards the deploy job. Free on every plan, private repos included.
+# Add the `review-gate` job to the workflow that deploys, and make the deploy job
+# depend on it. If the verdict is not valid, the deploy job never runs and the
+# owner gets an issue explaining why.
+
+name: deploy
+on:
+  pull_request: # the gate comments on the PR before you merge
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review-gate:
+    uses: fdmedicis/cross-model-review-gate/.github/workflows/review-gate.yml@v1
+    with:
+      provider: copilot # openai | gemini | deepseek | grok | copilot
+      mode: deploy
+    secrets: inherit
+
+  deploy:
+    needs: review-gate # <- the guarantee: no valid verdict, no deploy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deploy here"
