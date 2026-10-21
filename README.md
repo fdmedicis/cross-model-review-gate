@@ -278,8 +278,18 @@ positives** (known-good changes rejected). The suite is in
   Python, a prompt injection that also disables a password check, a workflow that
   force-pushes and wipes data.
 - **Known-good:** placeholders that look like secrets, a lockfile bump, a docs
-  typo pushed directly, a photo swap, a Terraform tag via PR, a feature with
+  typo pushed directly, an image swap, a Terraform tag via PR, a feature with
   tests, a CI cache tweak.
+
+**Verified live (October 2026)**, full suite, 13 known-bad and 7 known-good changes:
+
+| Provider / model | Known-bad caught | Known-good blocked on first run | What the miss was |
+|---|---|---|---|
+| copilot / `gpt-6-luna` (Copilot Free, automatic choice) | 13 / 13 | 1 / 7 | a gate redaction bug plus flaws in the test case, all fixed |
+| gemini / `gemini-3.8-flash` (free tier) | 13 / 13 | 1 / 7 | a test-case flaw (incomplete Terraform hunk), fixed |
+| openai / `gpt-6-sol` | 13 / 13 | 1 / 7 | test image too small for OpenAI to see, then mislabelled; fixed |
+
+Every miss so far was the gate or the test being wrong, never a reviewer passing a bad change.
 
 ```bash
 python -m unittest discover -s tests -v   # offline, no key needed

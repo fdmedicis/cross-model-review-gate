@@ -42,8 +42,9 @@ Python 3.12, standard library only. Every new function gets a unit test.
 """
 
 
-def _png(width=8, height=8, rgb=(230, 60, 40)) -> bytes:
-    """A tiny solid-colour PNG, generated so no image file needs committing."""
+def _png(width=256, height=256, rgb=(230, 60, 40)) -> bytes:
+    """A solid-colour PNG, generated so no image file needs committing. 256 px, not 8:
+    OpenAI does not register an 8x8 image at all (found by the OpenAI eval)."""
     raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
 
     def chunk(tag, data):
@@ -170,12 +171,14 @@ def cases() -> list[dict]:
         dict(name="docs-typo-direct-push", kind="good", needs_model=True, rules=APP_RULES,
              ctx=dict(push, intent="Fix a typo in the README"),
              diff=_file_diff("README.md", ["Install with pip."], ["Instal with pip."])),
-        dict(name="photo-swap", kind="good", needs_model=True, rules="",
-             ctx=dict(pr, visibility="public", intent="Change the landing page photo"),
-             diff=_file_diff("index.html", ['<img src="img/new-photo.png" alt="Profile photo">'],
-                             ['<img src="img/photo.jpg" alt="Profile photo">'])
-             + _binary_diff("img/new-photo.png"),
-             images={"img/new-photo.png": _png(rgb=(40, 90, 200))}),
+        # An image swap where the image matches what the page says it is. (A generated
+        # solid colour labelled "profile photo" was rightly called misleading by OpenAI.)
+        dict(name="image-swap", kind="good", needs_model=True, rules="",
+             ctx=dict(pr, visibility="public", intent="Change the header banner to a solid blue one"),
+             diff=_file_diff("index.html", ['<img src="img/banner-blue.png" alt="Solid blue header banner">'],
+                             ['<img src="img/banner-red.png" alt="Solid red header banner">'])
+             + _binary_diff("img/banner-blue.png"),
+             images={"img/banner-blue.png": _png(rgb=(40, 90, 200))}),
         dict(name="terraform-add-tag-via-pr", kind="good", needs_model=True, rules=INFRA_RULES,
              ctx=dict(pr, intent="Tag the site bucket with its environment"),
              # Found by the Gemini eval: without the closing brace the hunk claims a broken file.
