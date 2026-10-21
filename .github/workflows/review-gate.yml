@@ -38,6 +38,14 @@ on:
         description: "Comment on PRs and open an issue when a deploy is blocked"
         type: boolean
         default: true
+      fallback:
+        description: "auto: if the provider gives no verdict, try other providers whose key secret is passed; off: never"
+        type: string
+        default: auto
+      allow_bypass_when_unavailable:
+        description: "Let the repo owner bypass ONLY when no reviewer could produce a verdict: the owner adds the label review-gate-bypass to the pull request (for a push: to the merged PR), then re-runs the job"
+        type: boolean
+        default: false
       gate_ref:
         description: "Version of the gate code to run. Keep it equal to the @ref you call this workflow at"
         type: string
@@ -60,6 +68,9 @@ on:
       risk_tier:
         description: "low | high"
         value: ${{ jobs.gate.outputs.risk_tier }}
+      status:
+        description: "reviewed | unavailable | bypassed | error"
+        value: ${{ jobs.gate.outputs.status }}
 
 jobs:
   gate:
@@ -73,6 +84,7 @@ jobs:
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
       risk_tier: ${{ steps.review.outputs.risk_tier }}
+      status: ${{ steps.review.outputs.status }}
     steps:
       - name: Checkout the change
         uses: actions/checkout@v7
@@ -121,11 +133,15 @@ jobs:
           IN_MODE: ${{ inputs.mode }}
           IN_MAX: ${{ inputs.max_diff_tokens }}
           IN_NOTIFY: ${{ inputs.notify }}
+          IN_FALLBACK: ${{ inputs.fallback }}
+          IN_BYPASS: ${{ inputs.allow_bypass_when_unavailable }}
         run: |
           args=(ci --provider "$IN_PROVIDER" --mode "$IN_MODE" --max-diff-tokens "$IN_MAX")
           [ -n "$IN_MODEL" ] && args+=(--model "$IN_MODEL")
           [ -n "$IN_VISIBILITY" ] && args+=(--visibility "$IN_VISIBILITY")
           [ "$IN_NOTIFY" = "true" ] || args+=(--no-notify)
+          [ -n "$IN_FALLBACK" ] && args+=(--fallback "$IN_FALLBACK")
+          [ "$IN_BYPASS" = "true" ] && args+=(--allow-bypass)
           python -m gate "${args[@]}"
 
       - name: Keep the verdict

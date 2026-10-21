@@ -26,6 +26,8 @@ def _common(p):
     p.add_argument("--visibility", choices=["public", "private-mine", "shared"],
                    help="override the repo's declared visibility")
     p.add_argument("--max-diff-tokens", type=int, help="size budget for the diff (default 40000)")
+    p.add_argument("--fallback", choices=["auto", "off"],
+                   help="auto: if the provider gives no verdict, try other providers that have keys (default)")
     p.add_argument("--json", action="store_true", help="print the raw verdict JSON instead of Markdown")
 
 
@@ -68,6 +70,8 @@ def main(argv=None) -> int:
     cp = sub.add_parser("ci", help="run inside GitHub Actions")
     cp.add_argument("--mode", choices=["deploy", "merge"], default="deploy")
     cp.add_argument("--no-notify", action="store_true")
+    cp.add_argument("--allow-bypass", action="store_true",
+                    help="let the repo owner bypass when NO reviewer was available")
     _common(cp)
 
     ep = sub.add_parser("eval", help="score the gate on known-bad and known-good changes")
@@ -99,21 +103,23 @@ def main(argv=None) -> int:
 
     if a.cmd == "ci":
         return ci.run(provider=a.provider, model=a.model, visibility=a.visibility,
-                      limits=_limits(a), mode=a.mode, send_notifications=not a.no_notify)
+                      limits=_limits(a), mode=a.mode, send_notifications=not a.no_notify,
+                      fallback=a.fallback, allow_bypass=a.allow_bypass)
 
     if a.cmd == "review":
         diff = sys.stdin.read() if a.diff == "-" else Path(a.diff).read_text(encoding="utf-8", errors="replace")
         rules = Path(a.rules).read_text(encoding="utf-8", errors="replace") if a.rules else ""
         ctx = {"repo": a.repo, "target_branch": a.target_branch, "default_branch": a.default_branch,
                "via_pr": a.via_pr, "event": a.event, "intent": a.intent, "visibility": a.visibility}
-        v = engine.review(diff, {"repo": rules}, ctx, provider=a.provider, model=a.model, limits=_limits(a))
+        v = engine.review(diff, {"repo": rules}, ctx, provider=a.provider, model=a.model, limits=_limits(a),
+                          fallback=a.fallback)
         _print(v, a.json)
         return 0 if v["verdict"] == "valid" else 1
 
     if a.cmd == "local":
         v = review_local(a.repo_path, base=a.base, intent=a.intent, target_branch=a.target_branch,
                          via_pr=a.via_pr, visibility=a.visibility, provider=a.provider,
-                         model=a.model, limits=_limits(a))
+                         model=a.model, limits=_limits(a), fallback=a.fallback)
         _print(v, a.json)
         return 0 if v["verdict"] == "valid" else 1
     return 2
@@ -121,7 +127,8 @@ def main(argv=None) -> int:
 
 def review_local(repo_path: str, *, base: str | None = None, intent: str = "",
                  target_branch: str | None = None, via_pr: bool = False, visibility: str | None = None,
-                 provider: str | None = None, model: str | None = None, limits: dict | None = None) -> dict:
+                 provider: str | None = None, model: str | None = None, limits: dict | None = None,
+                 fallback: str | None = None) -> dict:
     """Review what a local checkout would push. Shared by the CLI and the MCP tool."""
     repo = str(Path(repo_path).resolve())
     default = gitlocal.default_branch(repo)
@@ -132,7 +139,7 @@ def review_local(repo_path: str, *, base: str | None = None, intent: str = "",
            "target_branch": target_branch or current, "default_branch": default,
            "via_pr": via_pr, "intent": intent, "visibility": visibility}
     return engine.review(diff, {"repo": gitlocal.read_rules(repo)}, ctx, provider=provider, model=model,
-                         images=gitlocal.changed_images(repo, diff), limits=limits)
+                         images=gitlocal.changed_images(repo, diff), limits=limits, fallback=fallback)
 
 
 if __name__ == "__main__":
