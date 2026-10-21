@@ -54,7 +54,7 @@ class Provider:
 PROVIDERS: dict[str, Provider] = {
     "openai": Provider("openai", "http", "OPENAI_API_KEY", "gpt-6-sol",
                        json_mode="json_schema", vision=True, base_url="https://api.openai.com/v1"),
-    "gemini": Provider("gemini", "http", "GEMINI_API_KEY", "gemini-3.6-flash",
+    "gemini": Provider("gemini", "http", "GEMINI_API_KEY", "gemini-3.8-flash",
                        json_mode="json_object", vision=True,
                        base_url="https://generativelanguage.googleapis.com/v1beta/openai"),
     "deepseek": Provider("deepseek", "http", "DEEPSEEK_API_KEY", "deepseek-v4-flash",

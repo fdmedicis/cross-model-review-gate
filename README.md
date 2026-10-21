@@ -165,7 +165,7 @@ OpenAI-compatible client; Copilot runs through the official Copilot CLI.
 | Provider | Secret / env var | Default model | Sees images | Cost | Data note |
 |---|---|---|---|---|---|
 | `openai` | `OPENAI_API_KEY` | `gpt-6-sol` | yes | paid; about 1-2 cents for a typical review | API data is not used for training by default |
-| `gemini` | `GEMINI_API_KEY` | `gemini-3.6-flash` | yes | **free tier**, rate-limited; paid tier available | free-tier content may be used to improve Google's products; use the paid tier for private code |
+| `gemini` | `GEMINI_API_KEY` | `gemini-3.8-flash` | yes | **free tier**, rate-limited; paid tier available | free-tier content may be used to improve Google's products; use the paid tier for private code |
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` | **no** | paid, fractions of a cent | stored in mainland China and may be used for training; not recommended for private infra |
 | `grok` | `XAI_API_KEY` | `grok-4.6` | yes | paid | see xAI's terms |
 | `copilot` | `COPILOT_GITHUB_TOKEN` | `gpt-6-sol`, then `gpt-5.4`, then Copilot's automatic choice (must not be Claude) | yes (attachments) | **included in Copilot plans, including Copilot Free's monthly allowance** | check "allow GitHub to use my data" in your Copilot settings |
