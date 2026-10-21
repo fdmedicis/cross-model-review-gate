@@ -73,9 +73,13 @@ never lower it.
   "reasons": ["short, specific"],
   "what_changed": "what it does. [owner/repo @ feature -> main, via pull request, 3 file(s)]",
   "checks": {"safety": "pass|fail", "correctness": "pass|fail", "on_standard": "pass|fail", "branch_rule": "pass|fail"},
-  "meta": {"provider": "...", "model": "...", "risk_signals": [], "decided_by_code": [], "...": "..."}
+  "meta": {"status": "reviewed | unavailable | error | bypassed", "provider": "...", "model": "...",
+           "attempts": [], "risk_signals": [], "decided_by_code": [], "...": "..."}
 }
 ```
+
+`meta.status` tells "a reviewer said no" apart from "no reviewer could review" (see
+[When a reviewer is not available](#when-a-reviewer-is-not-available-fallback-then-an-optional-owner-bypass)).
 
 `what_changed` is the audit line. Git history stays the authoritative record;
 there is no separate log.
@@ -161,9 +165,48 @@ jobs:
    `needs: review-gate` to the deploy job.
 
 Inputs: `provider`, `model`, `visibility`, `mode` (`deploy` | `merge`),
-`max_diff_tokens` (default 40000), `notify` (default true), `gate_ref` (default
-`v1`; keep it equal to the `@ref` you call the workflow at). Outputs: `verdict`,
-`risk_tier`.
+`max_diff_tokens` (default 40000), `notify` (default true), `fallback` (`auto` |
+`off`, default `auto`), `allow_bypass_when_unavailable` (default false), `gate_ref`
+(default `v1`; keep it equal to the `@ref` you call the workflow at). Outputs:
+`verdict`, `risk_tier`, `status`.
+
+## When a reviewer is not available: fallback, then an optional owner bypass
+
+Reviewers run out (Copilot Free's monthly allowance), hit rate limits, or go down.
+The gate separates **"no reviewer could review"** from **"a reviewer said no"**, and
+`meta.status` says which:
+
+| `meta.status` | Meaning | Can the owner bypass? |
+|---|---|---|
+| `reviewed` | a reviewer model, or the gate's own code, decided | never |
+| `unavailable` | no reviewer produced a verdict (allowance used up, rate limit, outage, garbled reply) | only if the repo opted in |
+| `error` | the gate is misconfigured: unknown provider, Claude model, missing or refused key, unusable model | never |
+| `bypassed` | the owner bypassed an `unavailable` result | (already bypassed) |
+
+**Fallback, only to providers that have keys.** With `fallback: auto` (the default),
+if the chosen provider produces no verdict, the next provider *with credentials*
+reviews instead, in the order copilot, openai, gemini, grok, deepseek. In CI, a
+provider counts only if the caller passes its secret; locally, if its key is in the
+environment. No other key, no fallback: the gate reports why it had no reviewer. You
+can also give an explicit order, `provider: copilot,openai`. A model override applies
+to the first provider only.
+
+**A verdict is never re-asked.** If the first reviewer says *not valid*, no other
+reviewer is consulted. Fallback covers a missing answer, never an unwelcome one.
+
+**Optional owner bypass, only for `unavailable`.** If a repo sets
+`allow_bypass_when_unavailable: true` and no reviewer could review, the repo owner
+can let the change through:
+
+- add the label `review-gate-bypass` to the pull request (for a deploy push: to the
+  merged pull request that brought the commit in),
+- re-run the failed gate job.
+
+The gate checks that the label is present **and that the owner added it**. It never
+bypasses a real verdict, a misconfigured gate, or a failed branch rule, and a direct
+push with no pull request can never be bypassed. The PR comment and job summary say
+`BYPASSED BY OWNER` and that no reviewer saw the change. Reading the label's history
+needs `issues: read` on private repos (public repos are readable anyway).
 
 ## Providers
 

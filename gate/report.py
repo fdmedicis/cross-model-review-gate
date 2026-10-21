@@ -13,9 +13,20 @@ _LABEL = {"safety": "Safety", "correctness": "Correctness", "on_standard": "On-s
 
 def to_markdown(v: dict, *, title: str = "Review gate", footer: str = "") -> str:
     ok = v["verdict"] == "valid"
-    head = "✅ **VALID**" if ok else "❌ **NOT VALID**"
+    status = v.get("meta", {}).get("status", "reviewed")
+    head = {"unavailable": "⚠️ **NO REVIEWER AVAILABLE** (not valid)",
+            "bypassed": "⏭️ **BYPASSED BY OWNER** (no reviewer was available)",
+            "error": "❌ **GATE MISCONFIGURED** (not valid)"}.get(
+        status, "✅ **VALID**" if ok else "❌ **NOT VALID**")
     meta = v.get("meta", {})
-    who = f"{meta.get('provider')} / {meta.get('model')}" if meta.get("provider") else "code only (no model call)"
+    if status in ("unavailable", "bypassed"):
+        who = "none (" + ", ".join(f"{a['provider']} failed" for a in meta.get("attempts", [])) + ")"
+    elif meta.get("provider"):
+        who = f"{meta.get('provider')} / {meta.get('model')}"
+        if meta.get("fallback_reason"):
+            who += f" (fallback: {meta['fallback_reason'][:200]})"
+    else:
+        who = "code only (no model call)"
     lines = [
         MARKER,
         f"### {title}: {head} · risk **{v['risk_tier'].upper()}**",
@@ -30,9 +41,9 @@ def to_markdown(v: dict, *, title: str = "Review gate", footer: str = "") -> str
     lines += ["", "**Reasons**", ""]
     lines += [f"- {r}" for r in v["reasons"]] or ["- (none given)"]
     lines += ["", f"<sub>Reviewer: {who}</sub>", ""]
-    details = {k: meta[k] for k in ("risk_signals", "decided_by_code", "diff_tokens", "files_reviewed",
-                                     "files_not_shown_generated", "images", "other_binaries", "usage",
-                                     "duration_s") if meta.get(k)}
+    details = {k: meta[k] for k in ("risk_signals", "decided_by_code", "chain", "attempts", "fallback_skipped",
+                                     "bypass", "diff_tokens", "files_reviewed", "files_not_shown_generated",
+                                     "images", "other_binaries", "usage", "duration_s") if meta.get(k)}
     if details:
         lines += ["<details><summary>Details</summary>", "", "```json",
                   json.dumps(details, indent=2, default=str), "```", "</details>", ""]

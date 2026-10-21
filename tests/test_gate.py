@@ -240,7 +240,8 @@ class Providers(unittest.TestCase):
 
 class Engine(unittest.TestCase):
     def setUp(self):
-        self.env = mock.patch.dict(os.environ, {"REVIEW_GATE_ALLOW_OFFLINE": "1", "REVIEW_GATE_OFFLINE_REPLY": ""})
+        self.env = mock.patch.dict(os.environ, {"REVIEW_GATE_ALLOW_OFFLINE": "1", "REVIEW_GATE_OFFLINE_REPLY": "",
+                                                "REVIEW_GATE_FALLBACK": "off"})
         self.env.start()
         self.ctx = {"repo": "o/r", "event": "pull_request", "target_branch": "main",
                     "default_branch": "main", "via_pr": True, "visibility": "private-mine"}
@@ -265,7 +266,8 @@ class Engine(unittest.TestCase):
         os.environ["REVIEW_GATE_OFFLINE_REPLY"] = "I think it looks fine!"
         v = engine.review(D("README.md", ["hi"]), "", self.ctx, provider="offline")
         self.assertEqual(v["verdict"], "not-valid")
-        self.assertTrue(any("gate error" in r for r in v["reasons"]))
+        self.assertEqual(v["meta"]["status"], "unavailable")              # no verdict, fails closed
+        self.assertTrue(any("no verdict" in r for r in v["reasons"]))
 
     def test_fails_closed_on_provider_error(self):
         with mock.patch.object(providers, "call", side_effect=providers.ProviderError("boom")):
@@ -378,6 +380,211 @@ class Git(unittest.TestCase):
         self.assertTrue(e["context"]["via_pr"])
         self.assertEqual(e["pr_number"], 7)
         self.assertEqual(e["rules_ref"], self.base)               # rules read at the BASE commit
+
+
+VALID_REPLY = json.dumps({"checks": {"safety": "pass", "correctness": "pass", "on_standard": "pass"},
+                          "risk_tier": "low", "reasons": ["ok"], "what_changed": "w"})
+REJECT_REPLY = json.dumps({"checks": {"safety": "fail", "correctness": "pass", "on_standard": "pass"},
+                           "risk_tier": "high", "reasons": ["unsafe"], "what_changed": "w"})
+
+
+class Fallback(unittest.TestCase):
+    """Fallback only to providers with keys, only when no verdict came back."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {
+            "REVIEW_GATE_ALLOW_OFFLINE": "1", "GITHUB_ACTIONS": "true", "REVIEW_GATE_MODEL": "auto",
+            "OPENAI_API_KEY": "k", "GEMINI_API_KEY": "", "XAI_API_KEY": "", "DEEPSEEK_API_KEY": "",
+            "COPILOT_GITHUB_TOKEN": "", "REVIEW_GATE_FALLBACK": ""})
+        self.env.start()
+        self.ctx = {"repo": "o/r", "event": "pull_request", "target_branch": "main",
+                    "default_branch": "main", "via_pr": True, "visibility": "private-mine"}
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_chain_only_adds_providers_with_keys(self):
+        chain, skipped = providers.resolve_chain("copilot", None, "auto")
+        self.assertEqual([p.name for p, _ in chain], ["copilot", "openai"])
+        self.assertEqual(chain[0][1], "auto")                 # the model override is the primary's
+        self.assertEqual(chain[1][1], providers.PROVIDERS["openai"].default_model)
+        self.assertIn("gemini: no key", skipped)
+
+    def test_chain_off_and_explicit_list(self):
+        self.assertEqual(len(providers.resolve_chain("copilot", None, "off")[0]), 1)
+        chain, _ = providers.resolve_chain("copilot,gemini,openai", None, "auto")
+        self.assertEqual([p.name for p, _ in chain], ["copilot", "openai"])   # explicit order, keyless dropped
+
+    def _review(self, replies):
+        """replies: provider name -> reply text, or an Exception to raise."""
+        calls = []
+
+        def fake_call(p, m, system, user, images=None):
+            calls.append(p.name)
+            r = replies[p.name]
+            if isinstance(r, Exception):
+                raise r
+            return r, {"usage": None}
+        with mock.patch.object(providers, "call", side_effect=fake_call):
+            v = engine.review(D("README.md", ["hi"]), "", self.ctx, provider="offline,openai", fallback="auto")
+        return v, calls
+
+    def test_falls_back_when_no_verdict(self):
+        v, calls = self._review({"offline": providers.ProviderError("allowance used up"), "openai": VALID_REPLY})
+        self.assertEqual(calls, ["offline", "openai"])
+        self.assertEqual((v["verdict"], v["meta"]["status"], v["meta"]["provider"]), ("valid", "reviewed", "openai"))
+        self.assertIn("allowance used up", v["meta"]["fallback_reason"])
+
+    def test_never_falls_back_after_a_verdict(self):
+        v, calls = self._review({"offline": REJECT_REPLY, "openai": VALID_REPLY})
+        self.assertEqual(calls, ["offline"])                    # no reviewer shopping
+        self.assertEqual((v["verdict"], v["meta"]["status"]), ("not-valid", "reviewed"))
+
+    def test_garbage_reply_counts_as_no_verdict(self):
+        v, calls = self._review({"offline": "looks fine to me", "openai": VALID_REPLY})
+        self.assertEqual(calls, ["offline", "openai"])
+        self.assertEqual(v["verdict"], "valid")
+
+    def test_all_fail_is_unavailable_not_rejected(self):
+        v, _ = self._review({"offline": providers.ProviderError("quota"), "openai": providers.ProviderError("429")})
+        self.assertEqual((v["verdict"], v["meta"]["status"]), ("not-valid", "unavailable"))
+        self.assertEqual(len(v["meta"]["attempts"]), 2)
+
+    def test_a_missing_or_refused_key_is_error_not_unavailable(self):
+        v, _ = self._review({"offline": providers.ProviderError("quota"),
+                             "openai": providers.ConfigError("provider refused the API key (401)")})
+        self.assertEqual(v["meta"]["status"], "error")             # never bypassable
+
+    def test_single_provider_says_no_fallback_configured(self):
+        os.environ["OPENAI_API_KEY"] = ""
+        with mock.patch.object(providers, "call", side_effect=providers.ProviderError("allowance used up")):
+            v = engine.review(D("README.md", ["hi"]), "", self.ctx, provider="offline", fallback="auto")
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertTrue(any("No fallback reviewer" in r for r in v["reasons"]))
+
+    def test_misconfigured_gate_is_error(self):
+        v = engine.review(D("README.md", ["hi"]), "", self.ctx, provider="nope")
+        self.assertEqual(v["meta"]["status"], "error")
+
+    def test_typo_in_explicit_chain_is_error_not_unavailable(self):
+        v = engine.review(D("README.md", ["hi"]), "", self.ctx, provider="offline,opneai", fallback="auto")
+        self.assertEqual(v["meta"]["status"], "error")         # never bypassable
+
+
+class Bypass(unittest.TestCase):
+    """The owner may bypass ONLY a missing reviewer, never a verdict or a code check."""
+
+    label_time = "2026-10-21T12:00:00Z"          # after the run was triggered (11:00)
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY": "o/r",
+                                                "GITHUB_REPOSITORY_OWNER": "owner", "GITHUB_ACTOR": "owner"})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
+    @staticmethod
+    def _verdict(status="unavailable", branch="pass"):
+        return {"verdict": "not-valid", "reasons": [], "meta": {"status": status},
+                "checks": {"safety": "fail", "correctness": "fail", "on_standard": "fail", "branch_rule": branch}}
+
+    def _api(self, labeler, labels=("review-gate-bypass",)):
+        def fake(method, path, token, body=None):
+            if path.endswith("/labels"):
+                return [{"name": n} for n in labels]
+            if "/events" in path:
+                return [{"event": "labeled", "label": {"name": "review-gate-bypass"}, "actor": {"login": labeler},
+                         "created_at": self.label_time}]
+            return []
+        return fake
+
+    def test_owner_label_bypasses_unavailable(self):
+        v = self._verdict()
+        with mock.patch.object(ci, "_api", side_effect=self._api("owner")):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "bypassed")
+
+    def test_label_from_before_the_run_does_not_count(self):
+        self.label_time = "2026-10-21T10:00:00Z"   # pre-emptive or leftover label
+        v = self._verdict()
+        with mock.patch.object(ci, "_api", side_effect=self._api("owner")):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertIn("before this run", v["meta"]["bypass_not_applied"])
+
+    def test_label_by_someone_else_does_not(self):
+        v = self._verdict()
+        with mock.patch.object(ci, "_api", side_effect=self._api("intruder")):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertIn("not the owner", v["meta"]["bypass_not_applied"])
+
+    def test_not_allowed_unless_repo_opts_in(self):
+        v = self._verdict()
+        with mock.patch.object(ci, "_api", side_effect=self._api("owner")):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=False)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+
+    def test_latest_label_event_wins_across_pages(self):
+        # Owner labeled long ago (page 1); someone else re-added it later (page 2).
+        page1 = [{"event": "labeled", "label": {"name": "review-gate-bypass"}, "actor": {"login": "owner"}}]
+        page1 += [{"event": "commented"}] * 99
+        page2 = [{"event": "labeled", "label": {"name": "review-gate-bypass"}, "actor": {"login": "intruder"}}]
+
+        def fake(method, path, token, body=None):
+            if path.endswith("/labels"):
+                return [{"name": "review-gate-bypass"}]
+            return page2 if "page=2" in path else page1 if "page=1" in path else []
+        v = self._verdict()
+        with mock.patch.object(ci, "_api", side_effect=fake):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertIn("intruder", v["meta"]["bypass_not_applied"])
+
+    def test_too_many_events_fails_closed(self):
+        full = [{"event": "commented"}] * 100
+
+        def fake(method, path, token, body=None):
+            return [{"name": "review-gate-bypass"}] if path.endswith("/labels") else full
+        v = self._verdict()
+        with mock.patch.object(ci, "_api", side_effect=fake):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertIn("too many events", v["meta"]["bypass_not_applied"])
+
+    def test_never_bypasses_a_real_verdict(self):
+        v = self._verdict(status="reviewed")
+        with mock.patch.object(ci, "_api", side_effect=self._api("owner")):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "reviewed")
+
+    def test_never_bypasses_a_failed_branch_rule(self):
+        v = self._verdict(branch="fail")
+        with mock.patch.object(ci, "_api", side_effect=self._api("owner")):
+            ci.apply_bypass(v, {"pr_number": 3, "context": {}, "triggered_at": "2026-10-21T11:00:00Z"}, allow=True)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertIn("branch rule", v["meta"]["bypass_refused"])
+
+    def test_push_bypass_uses_the_merged_prs_label(self):
+        def fake(method, path, token, body=None):
+            if "/pulls" in path:
+                return [{"number": 9, "merged_at": "2026-10-21", "base": {"ref": "main"}}]
+            return self._api("owner")(method, path, token, body)
+        v = self._verdict()
+        ev = {"pr_number": None, "head": "abc", "context": {"target_branch": "main"}, "triggered_at": "2026-10-21T11:00:00Z"}
+        with mock.patch.object(ci, "_api", side_effect=fake):
+            ci.apply_bypass(v, ev, allow=True)
+        self.assertEqual(v["meta"]["status"], "bypassed")
+        self.assertIn("#9", v["meta"]["bypass"])
+
+    def test_direct_push_can_never_be_bypassed(self):
+        v = self._verdict()
+        ev = {"pr_number": None, "head": "abc", "context": {"target_branch": "main"}, "triggered_at": "2026-10-21T11:00:00Z"}
+        with mock.patch.object(ci, "_api", side_effect=lambda *a, **k: []):
+            ci.apply_bypass(v, ev, allow=True)
+        self.assertEqual(v["meta"]["status"], "unavailable")
+        self.assertIn("direct push", v["meta"]["bypass_not_applied"])
 
 
 class OfflineSuite(unittest.TestCase):

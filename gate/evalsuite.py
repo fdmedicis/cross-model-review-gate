@@ -226,8 +226,9 @@ def run(*, provider: str | None = None, model: str | None = None, offline: bool 
     for c in selected:
         prov = c.get("provider") or ("offline" if offline else provider)
         t0 = time.monotonic()
+        # fallback off: the score must belong to the provider named, never a stand-in.
         v = engine.review(c["diff"], {"repo": c["rules"]}, c["ctx"], provider=prov, model=model,
-                          images=c.get("images"))
+                          images=c.get("images"), fallback="off")
         failed = [k for k, s in v["checks"].items() if s == "fail"]
         if c["kind"] == "bad":
             if v["verdict"] == "not-valid" and set(failed) & set(c["expect_fail"]):

@@ -78,19 +78,70 @@ _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
          ".gif": "image/gif", ".webp": "image/webp"}
 
 
-def resolve(provider: str | None, model: str | None) -> tuple[Provider, str]:
+def resolve(provider: str | None, model: str | None, use_env_model: bool = True) -> tuple[Provider, str]:
     name = (provider or os.environ.get("REVIEW_GATE_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    name = name.split(",")[0].strip()          # a chain "a,b" resolves to its first provider here
     if name not in PROVIDERS:
         raise ConfigError(f"unknown provider '{name}'. Use one of: "
                           + ", ".join(k for k in PROVIDERS if k != "offline"))
     p = PROVIDERS[name]
-    m = (model or os.environ.get("REVIEW_GATE_MODEL") or p.default_model).strip()
+    env_model = os.environ.get("REVIEW_GATE_MODEL") if use_env_model else None
+    m = (model or env_model or p.default_model).strip()
     if "claude" in m.lower() or "anthropic" in m.lower():
         raise ConfigError(f"model '{m}' is a Claude model. The gate reviews Claude's work, "
                           f"so the reviewer must be a different model family.")
     if p.kind == "offline" and os.environ.get("REVIEW_GATE_ALLOW_OFFLINE") != "1":
         raise ConfigError("the offline stub only runs in tests (REVIEW_GATE_ALLOW_OFFLINE=1)")
     return p, m
+
+
+# --- Fallback chain ------------------------------------------------------------------
+# If the first provider cannot produce a verdict (allowance used up, rate limit, outage,
+# missing credentials), the next provider THAT HAS CREDENTIALS reviews instead. A
+# provider without a key is skipped silently: no key, no fallback. A verdict is never
+# re-asked elsewhere, valid or not: the engine stops at the first verdict it gets.
+
+FALLBACK_ORDER = ("copilot", "openai", "gemini", "grok", "deepseek")
+
+
+def has_credentials(p: Provider) -> bool:
+    if p.kind == "offline":
+        return os.environ.get("REVIEW_GATE_ALLOW_OFFLINE") == "1"
+    # Only an actual key counts. (An installed Copilot CLI proves nothing about a login;
+    # Copilot as the FIRST provider is always tried, which covers a local CLI login.)
+    return bool(os.environ.get(p.key_env, "").strip())
+
+
+def resolve_chain(provider: str | None, model: str | None,
+                  fallback: str | None = None) -> tuple[list, list]:
+    """Return ([(Provider, model), ...], [skipped notes]).
+
+    provider: one name, or an explicit ordered list "copilot,openai".
+    fallback: "auto" (default) adds, after a single provider, every other provider
+              that has credentials, in FALLBACK_ORDER; "off" uses only the first.
+    The model override applies to the FIRST provider only; fallbacks use their default.
+    Raises ConfigError if the first provider is unknown or a Claude model is requested.
+    """
+    spec = (provider or os.environ.get("REVIEW_GATE_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    names = [n.strip() for n in spec.split(",") if n.strip()] or [DEFAULT_PROVIDER]
+    mode = (fallback or os.environ.get("REVIEW_GATE_FALLBACK") or "auto").strip().lower()
+    if mode == "off":
+        names = names[:1]
+    elif mode == "auto" and len(names) == 1:
+        names += [n for n in FALLBACK_ORDER if n not in names]
+    names = list(dict.fromkeys(names))
+
+    chain, skipped = [resolve(names[0], model)], []
+    for name in names[1:]:
+        p = PROVIDERS.get(name)
+        if p is None or (p.kind == "offline" and os.environ.get("REVIEW_GATE_ALLOW_OFFLINE") != "1"):
+            # A typo must not look like "no reviewer available" (which a repo may bypass).
+            raise ConfigError(f"unknown provider '{name}' in the provider list")
+        elif not has_credentials(p):
+            skipped.append(f"{name}: no key")
+        else:
+            chain.append(resolve(name, None, use_env_model=False))
+    return chain, skipped
 
 
 def call(p: Provider, model: str, system: str, user: str,

@@ -24,6 +24,13 @@ from pathlib import Path
 from . import checks, diffutil, prompt, providers
 
 VERDICT_KEYS = ("verdict", "risk_tier", "reasons", "what_changed", "checks")
+
+# meta.status says HOW the verdict was reached (kept in meta: the v1 verdict keys are unchanged):
+#   reviewed     a reviewer model, or the gate's own code, decided
+#   unavailable  no reviewer could produce a verdict (allowance, outage, credentials);
+#                the only case a repo may let its owner bypass
+#   error        the gate is misconfigured (unknown provider, Claude model requested)
+#   bypassed     set by CI when the owner bypassed an "unavailable" result
 CHECK_KEYS = ("safety", "correctness", "on_standard", "branch_rule")
 
 _GLOBAL_RULES_PATH = Path(__file__).resolve().parent.parent / "rules" / "global.md"
@@ -38,7 +45,8 @@ def load_global_rules() -> str:
 
 def review(diff: str, rules: dict | str | None = None, context: dict | None = None, *,
            provider: str | None = None, model: str | None = None,
-           images: dict | None = None, limits: dict | None = None) -> dict:
+           images: dict | None = None, limits: dict | None = None,
+           fallback: str | None = None) -> dict:
     """Review one change and return the verdict.
 
     Args:
@@ -79,7 +87,7 @@ def review(diff: str, rules: dict | str | None = None, context: dict | None = No
         "decided_by_code": [],
     }
 
-    def finish(model_checks, tier, reasons, what):
+    def finish(model_checks, tier, reasons, what, status="reviewed"):
         b_status, b_reason = checks.branch_rule(
             visibility=visibility, target_branch=context.get("target_branch", ""),
             default_branch=context.get("default_branch", "main"),
@@ -91,6 +99,7 @@ def review(diff: str, rules: dict | str | None = None, context: dict | None = No
             meta["decided_by_code"].append(f"branch_rule pass: {b_reason}")
         verdict = "valid" if all(v == "pass" for v in all_checks.values()) else "not-valid"
         meta["duration_s"] = round(time.monotonic() - started, 2)
+        meta["status"] = status
         return {
             "verdict": verdict,
             "risk_tier": tier,
@@ -158,13 +167,14 @@ def review(diff: str, rules: dict | str | None = None, context: dict | None = No
         meta["risk_signals"] = signals
         tier_floor = "high"
 
-    # 5. Model review.
+    # 5. Model review, with fallback to providers that have credentials.
     try:
-        p, m = providers.resolve(provider, model)
+        chain, skipped = providers.resolve_chain(provider, model, fallback)
     except providers.ConfigError as e:
         meta["decided_by_code"].append("provider misconfigured")
-        return finish(failed, tier_floor, [f"gate error: {e}"], "review provider misconfigured")
-    meta.update(provider=p.name, model=m)
+        return finish(failed, tier_floor, [f"gate error: {e}"], "review provider misconfigured", status="error")
+    meta.update(provider=chain[0][0].name, model=chain[0][1],
+                chain=[f"{p.name}/{m}" for p, m in chain], fallback_skipped=skipped)
 
     diff_text = checks.redact_secrets("".join(f.text for f in budget.reviewable))
     model_context = {
@@ -177,17 +187,40 @@ def review(diff: str, rules: dict | str | None = None, context: dict | None = No
         diff_text=diff_text, repo_rules=repo_rules, global_rules=global_rules,
         context=model_context, skipped=[f.path for f in budget.generated],
         images=[f.path for f in budget.images], risk_floor_reasons=signals)
-    try:
-        raw, call_meta = providers.call(p, m, prompt.SYSTEM_PROMPT, user_msg,
-                                        images=[(f.path, images[f.path]) for f in budget.images])
+    attempts, parsed = [], None
+    for p, m in chain:
+        try:
+            raw, call_meta = providers.call(p, m, prompt.SYSTEM_PROMPT, user_msg,
+                                            images=[(f.path, images[f.path]) for f in budget.images])
+            candidate = prompt.validate_model_output(prompt.extract_json(raw))
+        except (providers.ProviderError, prompt.ModelOutputError) as e:
+            # ConfigError (missing or refused key, unusable model...) is a misconfiguration;
+            # anything else (allowance, rate limit, outage, garbled reply) is a missing reviewer.
+            kind = "config" if isinstance(e, providers.ConfigError) else "unavailable"
+            attempts.append({"provider": p.name, "model": m, "kind": kind, "error": str(e)[:400]})
+            continue                                     # no verdict from this one: try the next
         meta.update(call_meta)
-        if call_meta.get("model_used"):
-            meta["model"] = call_meta["model_used"]     # the model that actually reviewed
-        parsed = prompt.validate_model_output(prompt.extract_json(raw))
-    except (providers.ProviderError, prompt.ModelOutputError) as e:
-        meta["decided_by_code"].append("review failed closed")
-        return finish(failed, tier_floor, [f"gate error: {e}",
-                      "The gate fails closed: no review means not valid."], "review could not be completed")
+        meta.update(provider=p.name, model=call_meta.get("model_used") or m)
+        parsed = candidate
+        break                                            # first verdict wins, valid or not
+    meta["attempts"] = attempts
+    if attempts and parsed is not None:
+        meta["fallback_reason"] = "; ".join(f"{a['provider']}: {a['error'][:160]}" for a in attempts)
+    if parsed is None:
+        meta["decided_by_code"].append("no reviewer available: failed closed")
+        reasons = [f"no verdict from {a['provider']}/{a['model']}: {a['error']}" for a in attempts]
+        if len(chain) == 1:
+            reasons.append("No fallback reviewer: no other provider has a key here"
+                           + (f" ({', '.join(skipped)})" if skipped else "") + ".")
+        reasons.append("No reviewer could review this change, so it is not valid. "
+                       "This is not a rejection of the change itself.")
+        # Any misconfiguration makes the whole result "error": a repo may bypass a missing
+        # reviewer, never a broken setup (fix the key or the model instead).
+        status = "error" if any(a["kind"] == "config" for a in attempts) else "unavailable"
+        if status == "error":
+            reasons.append("At least one reviewer is misconfigured (key or model). Fix it; "
+                           "a misconfigured gate can never be bypassed.")
+        return finish(failed, tier_floor, reasons, "no reviewer was available", status=status)
 
     tier = "high" if "high" in (parsed["risk_tier"], tier_floor) else "low"
     reasons = parsed["reasons"] or ["The review model gave no reasons."]
