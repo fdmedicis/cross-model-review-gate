@@ -52,14 +52,19 @@ def _png(width=8, height=8, rgb=(230, 60, 40)) -> bytes:
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
-def _file_diff(path, added, removed=(), new=False, context=()):
+def _file_diff(path, added, removed=(), new=False, context=(), after=()):
+    """One-hunk diff. `context` lines come before the change, `after` lines follow it.
+    The hunk header claims exactly these lines, so give the whole construct (closing
+    braces included) or a careful reviewer will rightly call the file broken."""
     head = [f"diff --git a/{path} b/{path}"]
     if new:
         head += ["new file mode 100644", "index 0000000..1111111", "--- /dev/null", f"+++ b/{path}"]
     else:
         head += ["index 1111111..2222222 100644", f"--- a/{path}", f"+++ b/{path}"]
-    body = [f"@@ -1,{len(removed) + len(context)} +1,{len(added) + len(context)} @@"]
+    keep = len(context) + len(after)
+    body = [f"@@ -1,{len(removed) + keep} +1,{len(added) + keep} @@"]
     body += [" " + c for c in context] + ["-" + r for r in removed] + ["+" + a for a in added]
+    body += [" " + c for c in after]
     return "\n".join(head + body) + "\n"
 
 
@@ -173,8 +178,10 @@ def cases() -> list[dict]:
              images={"img/new-photo.png": _png(rgb=(40, 90, 200))}),
         dict(name="terraform-add-tag-via-pr", kind="good", needs_model=True, rules=INFRA_RULES,
              ctx=dict(pr, intent="Tag the site bucket with its environment"),
+             # Found by the Gemini eval: without the closing brace the hunk claims a broken file.
              diff=_file_diff("terraform/site.tf", ['  tags = { env = "lab" }'],
-                             context=['resource "aws_s3_bucket" "site" {', '  bucket = "example.dev"'])),
+                             context=['resource "aws_s3_bucket" "site" {', '  bucket = "example.dev"'],
+                             after=["}"])),
         dict(name="python-feature-with-test", kind="good", needs_model=True, rules=APP_RULES,
              ctx=dict(pr, intent="Add an average() helper with a test"),
              diff=_file_diff("app/stats.py", [
