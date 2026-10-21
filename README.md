@@ -132,7 +132,16 @@ On public repos, use both: a required check on PRs and `needs:` on the deploy.
   (`review-gate-verdict.json`, 30 days). GitHub also emails you about failed runs
   by default.
 
-The caller must grant `pull-requests: write` and `issues: write` (the examples do).
+**Permissions are the caller's choice.** The gate job inherits exactly what the caller grants:
+
+| Permission | Needed for |
+|---|---|
+| `contents: read` | always (reading the change) |
+| `pull-requests: write` | the verdict comment on PRs |
+| `issues: write` | the "deploy blocked" issue (deploy mode only) |
+
+Grant only what you use. A missing permission skips that notice; the verdict and the
+pass/fail check still work.
 
 ## Adding the CI backstop to a repo
 

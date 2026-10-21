@@ -66,10 +66,10 @@ jobs:
     name: review gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: write # sticky verdict comment on PRs
-      issues: write # "deploy blocked" issue for the owner
+    # No permissions block on purpose: the job inherits exactly what the CALLER grants,
+    # so each repo chooses its least privilege. contents: read is always needed;
+    # pull-requests: write enables the PR comment; issues: write enables the
+    # "deploy blocked" issue (deploy mode only). Missing ones just skip that notice.
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
       risk_tier: ${{ steps.review.outputs.risk_tier }}
