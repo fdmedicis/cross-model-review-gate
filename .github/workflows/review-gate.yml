@@ -46,6 +46,14 @@ on:
         description: "Let the repo owner bypass ONLY when no reviewer could produce a verdict: the owner adds the label review-gate-bypass to the pull request (for a push: to the merged PR), then re-runs the job"
         type: boolean
         default: false
+      catchup_base:
+        description: "Deploy mode, push or manual run: the last deployed commit of catchup_paths. Changes under those paths since then are reviewed too, not only this push. Must be an ancestor of the push. Empty = review only the push"
+        type: string
+        default: ""
+      catchup_paths:
+        description: "Space-separated plain repo paths (no spaces in names, no pathspec magic) for catchup_base. Set both or neither"
+        type: string
+        default: ""
       gate_ref:
         description: "Version of the gate code to run. Keep it equal to the @ref you call this workflow at"
         type: string
@@ -135,6 +143,8 @@ jobs:
           IN_NOTIFY: ${{ inputs.notify }}
           IN_FALLBACK: ${{ inputs.fallback }}
           IN_BYPASS: ${{ inputs.allow_bypass_when_unavailable }}
+          IN_CATCHUP_BASE: ${{ inputs.catchup_base }}
+          IN_CATCHUP_PATHS: ${{ inputs.catchup_paths }}
         run: |
           args=(ci --provider "$IN_PROVIDER" --mode "$IN_MODE" --max-diff-tokens "$IN_MAX")
           [ -n "$IN_MODEL" ] && args+=(--model "$IN_MODEL")
@@ -142,6 +152,10 @@ jobs:
           [ "$IN_NOTIFY" = "true" ] || args+=(--no-notify)
           [ -n "$IN_FALLBACK" ] && args+=(--fallback "$IN_FALLBACK")
           [ "$IN_BYPASS" = "true" ] && args+=(--allow-bypass)
+          # Passed whenever either is set, so "only one of them" reaches the gate and fails.
+          if [ -n "$IN_CATCHUP_BASE$IN_CATCHUP_PATHS" ]; then
+            args+=(--catchup-base "$IN_CATCHUP_BASE" --catchup-paths "$IN_CATCHUP_PATHS")
+          fi
           python -m gate "${args[@]}"
 
       - name: Keep the verdict

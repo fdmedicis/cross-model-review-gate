@@ -62,6 +62,36 @@ def diff_range(repo: str, base: str, head: str) -> str:
     return git(repo, "diff", *_DIFF_FLAGS, f"{base}...{head}")
 
 
+def is_ancestor(repo: str, older: str, newer: str) -> bool:
+    """True if `older` is `newer` or one of its ancestors."""
+    r = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", older, newer],
+                       capture_output=True, stdin=subprocess.DEVNULL)
+    return r.returncode == 0
+
+
+def check_pathspecs(paths: list[str]) -> list[str]:
+    """Plain repo paths only. No pathspec magic (':(exclude)…'), options ('-…'), absolute
+    paths or '..': a path that silently matched less would hide changes from the review."""
+    if not paths:
+        raise ValueError("no paths given")
+    for p in paths:
+        parts = p.replace("\\", "/").split("/")
+        if (not p or p.startswith(("-", ":", "/")) or "\0" in p or ".." in parts
+                or (len(p) > 1 and p[1] == ":")):
+            raise ValueError(f"not a plain repo path: {p!r}")
+    return paths
+
+
+def diff_catchup(repo: str, catchup_base: str, before: str, head: str, paths: list[str]) -> str:
+    """A deploy that catches up: everything under `paths` since `catchup_base` (the last
+    deployed commit), plus the rest of this push (before..head outside `paths`). Each file
+    appears once. `paths` must have passed check_pathspecs; the exclusions are built here."""
+    inside = git(repo, "diff", *_DIFF_FLAGS, catchup_base, head, "--", *[f":(literal){p}" for p in paths])
+    outside = git(repo, "diff", *_DIFF_FLAGS, before, head, "--", ".",
+                  *[f":(exclude,literal){p}" for p in paths])
+    return inside + outside
+
+
 def diff_worktree(repo: str, base: str) -> str:
     """Everything that would be pushed: commits since `base`, staged and unstaged
     edits, and new untracked files (minus ignored ones). Nothing is staged or changed."""

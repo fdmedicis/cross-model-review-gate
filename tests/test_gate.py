@@ -368,6 +368,66 @@ class Git(unittest.TestCase):
         self.assertFalse(e["context"]["via_pr"])                  # no token: conservative
         self.assertIn("a.txt", gitlocal.diff_range(self.repo, e["base"], e["head"]))
 
+    def _sha(self, ref="HEAD"):
+        return subprocess.run(["git", "-C", self.repo, "rev-parse", ref], capture_output=True,
+                              text=True).stdout.strip()
+
+    def _catchup_history(self):
+        """init (deployed) -> held change in site/ and in other.txt -> this push (site/ + notes.md)."""
+        Path(self.repo, "site").mkdir()
+        Path(self.repo, "site", "page.html").write_text("v1\n")
+        self.run("add", ".")
+        self.run("commit", "-qm", "deployed")
+        deployed = self._sha()
+        Path(self.repo, "site", "page.html").write_text("v2 held\n")
+        Path(self.repo, "site", "old.css").write_text("held only\n")
+        Path(self.repo, "other.txt").write_text("unrelated, earlier\n")
+        self.run("add", ".")
+        self.run("commit", "-qm", "held refresh")
+        before = self._sha()
+        Path(self.repo, "site", "page.html").write_text("v3 now\n")
+        Path(self.repo, "notes.md").write_text("this push\n")
+        self.run("add", ".")
+        self.run("commit", "-qm", "this refresh")
+        return deployed, before, self._sha()
+
+    def _push_ev(self, before, head, msg="this refresh"):
+        ev = Path(self.repo, "event.json")
+        ev.write_text(json.dumps({"before": before, "after": head, "head_commit": {"message": msg},
+                                  "repository": {"default_branch": "main"}}))
+        env = {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(ev), "GITHUB_REPOSITORY": "o/r",
+               "GITHUB_REF_NAME": "main", "GITHUB_TOKEN": ""}
+        with mock.patch.dict(os.environ, env):
+            return ci.event_context(self.repo)
+
+    def test_catchup_reviews_held_changes_under_paths_plus_the_push(self):
+        deployed, before, head = self._catchup_history()
+        e = self._push_ev(before, head)
+        diff = ci.catchup_diff(e, self.repo, deployed, "site")
+        files = {f.path for f in diffutil.parse_diff(diff)}
+        # site/ since the last deploy (incl. the held old.css), plus the push's own notes.md;
+        # other.txt changed earlier outside the paths, was not in this push: not reviewed.
+        self.assertEqual(files, {"site/page.html", "site/old.css", "notes.md"})
+        self.assertEqual(len(diffutil.parse_diff(diff)), 3)             # each file once
+        self.assertIn("held refresh", e["context"]["intent"])
+        self.assertIn(deployed[:7], e["catchup"])
+
+    def test_catchup_refuses_doubtful_input(self):
+        deployed, before, head = self._catchup_history()
+        bad = [(deployed, ""), ("", "site"),                       # only one of the two
+               (deployed, ":(exclude)site"), (deployed, "-p"),     # pathspec magic, option
+               (deployed, "../x"), (deployed, "/abs"),
+               ("0" * 40, "site"),                                 # not a commit
+               (head, "site")]                                     # not an ancestor of before
+        for base, paths in bad:
+            with self.subTest(base=base[:7], paths=paths), self.assertRaises(SystemExit):
+                ci.catchup_diff(self._push_ev(before, head), self.repo, base, paths)
+
+    def test_catchup_is_not_for_pull_requests(self):
+        ev = {"context": {"event": "pull_request"}, "base": self.base, "head": self.base}
+        with self.assertRaises(SystemExit):
+            ci.catchup_diff(ev, self.repo, self.base, "a.txt")
+
     def test_ci_pull_request_event(self):
         ev = Path(self.repo, "event.json")
         ev.write_text(json.dumps({"pull_request": {

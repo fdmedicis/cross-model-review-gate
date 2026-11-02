@@ -2,7 +2,7 @@
 
   python -m gate local    --repo-path .  [--base main]          review a working tree before a push
   python -m gate review   --diff change.diff [--rules CLAUDE.md]  review a diff file
-  python -m gate ci                                               inside GitHub Actions
+  python -m gate ci [--catchup-base SHA --catchup-paths "a b"]   inside GitHub Actions
   python -m gate eval     --provider openai | --offline          known-bad / known-good scores
   python -m gate providers                                        which providers have a key set
 
@@ -72,6 +72,10 @@ def main(argv=None) -> int:
     cp.add_argument("--no-notify", action="store_true")
     cp.add_argument("--allow-bypass", action="store_true",
                     help="let the repo owner bypass when NO reviewer was available")
+    cp.add_argument("--catchup-base", default="",
+                    help="deploy catching up: the last deployed commit of --catchup-paths")
+    cp.add_argument("--catchup-paths", default="",
+                    help="space-separated repo paths whose changes since --catchup-base are reviewed too")
     _common(cp)
 
     ep = sub.add_parser("eval", help="score the gate on known-bad and known-good changes")
@@ -104,7 +108,8 @@ def main(argv=None) -> int:
     if a.cmd == "ci":
         return ci.run(provider=a.provider, model=a.model, visibility=a.visibility,
                       limits=_limits(a), mode=a.mode, send_notifications=not a.no_notify,
-                      fallback=a.fallback, allow_bypass=a.allow_bypass)
+                      fallback=a.fallback, allow_bypass=a.allow_bypass,
+                      catchup_base=a.catchup_base, catchup_paths=a.catchup_paths)
 
     if a.cmd == "review":
         diff = sys.stdin.read() if a.diff == "-" else Path(a.diff).read_text(encoding="utf-8", errors="replace")
