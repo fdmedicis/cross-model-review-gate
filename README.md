@@ -125,6 +125,33 @@ private repos without Pro. Two honest limits:
 
 On public repos, use both: a required check on PRs and `needs:` on the deploy.
 
+### Catching up after a blocked deploy (v1.2.0)
+
+In deploy mode a blocked change stays on the default branch, undeployed. A later
+push to the same part must not deploy it on the strength of a review that only saw
+the later push, so a careful caller holds every later deploy too until the owner
+deploys by hand. One unlucky verdict then blocks a part for days.
+
+`catchup_base` + `catchup_paths` fix that from the caller's side. The caller passes
+the commit where those paths were last deployed (it knows; the gate doesn't), and
+the gate reviews **everything under those paths since then**, plus the rest of this
+push. A valid verdict therefore covers everything the deploy would ship, and the
+caller can deploy it. Each file appears once in the diff; the intent lists the
+earlier, undeployed commits.
+
+```yaml
+    with:
+      mode: deploy
+      catchup_base: ${{ needs.plan.outputs.catchup_base }}    # empty = review only the push
+      catchup_paths: ${{ needs.plan.outputs.catchup_paths }}  # e.g. "today .github/workflows/deploy.yml"
+```
+
+Fail closed: set only one of them, a path with pathspec magic (`:(…)`), an option
+(`-…`), `..` or an absolute path, a base that is not a commit or not an ancestor of
+the push, or a pull request event, and the job fails without a verdict. Paths can't
+contain spaces. Changes outside `catchup_paths` are reviewed only for this push, as
+before: the caller decides what the verdict releases.
+
 ### Notifications: a block is never silent
 
 - **Pull request:** one sticky comment with the full verdict, updated on every push.

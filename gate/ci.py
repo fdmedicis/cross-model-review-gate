@@ -272,15 +272,50 @@ def apply_bypass(verdict: dict, ev: dict, *, allow: bool, repo_dir: str = ".") -
         verdict["meta"]["bypass_not_applied"] = why
 
 
+def catchup_diff(ev: dict, repo_dir: str, base: str, paths_text: str) -> str:
+    """Deploy mode, catching up: the caller says `paths` last deployed at commit `base`, and
+    changes to them since were never deployed. Review all of those, not just this push, so a
+    valid verdict covers everything the deploy would ship. Any doubt is a config error
+    (SystemExit), which fails the job: fail closed."""
+    if ev["context"]["event"] not in ("push", "workflow_dispatch"):
+        raise SystemExit("review-gate: catchup_base/catchup_paths are for push or manual runs only")
+    paths = paths_text.split()
+    if not base or not paths:
+        raise SystemExit("review-gate: set both catchup_base and catchup_paths, or neither")
+    try:
+        gitlocal.check_pathspecs(paths)
+    except ValueError as e:
+        raise SystemExit(f"review-gate: catchup_paths: {e}") from None
+    sha = gitlocal.git(repo_dir, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False).strip()
+    before = ev["base"]
+    if not sha:
+        raise SystemExit(f"review-gate: catchup_base {base!r} is not a commit in this repo")
+    if before == EMPTY_TREE:
+        raise SystemExit("review-gate: this push has no previous commit to catch up from")
+    if not gitlocal.is_ancestor(repo_dir, sha, before):
+        raise SystemExit(f"review-gate: catchup_base {sha[:7]} is not an ancestor of this push's base {before[:7]}")
+    earlier = gitlocal.git(repo_dir, "log", "--format=- %h %s", f"{sha}..{before}", "--",
+                           *[f":(literal){p}" for p in paths], check=False).strip().splitlines()
+    ev["context"]["intent"] += (
+        f"\n\nThis deploy also ships earlier changes under {', '.join(paths)} that were never "
+        f"deployed (last deployed at {sha[:7]}). The diff covers all of them:\n"
+        + "\n".join(earlier[:30]) + ("\n- …" if len(earlier) > 30 else ""))
+    ev["catchup"] = f"{sha[:7]}..{(ev['head'] or '')[:7]} under {' '.join(paths)} ({len(earlier)} earlier commit(s))"
+    return gitlocal.diff_catchup(repo_dir, sha, before, ev["head"], paths)
+
+
 def run(*, repo_dir: str = ".", provider: str | None = None, model: str | None = None,
         visibility: str | None = None, limits: dict | None = None, mode: str = "deploy",
         send_notifications: bool = True, fallback: str | None = None,
-        allow_bypass: bool = False) -> int:
+        allow_bypass: bool = False, catchup_base: str = "", catchup_paths: str = "") -> int:
     ev = event_context(repo_dir)
     ctx = ev["context"]
     if visibility:
         ctx["visibility"] = visibility
-    diff = gitlocal.diff_range(repo_dir, ev["base"], ev["head"])
+    if catchup_base or catchup_paths:
+        diff = catchup_diff(ev, repo_dir, catchup_base, catchup_paths)
+    else:
+        diff = gitlocal.diff_range(repo_dir, ev["base"], ev["head"])
     rules = gitlocal.read_rules(repo_dir, ev["rules_ref"]) if ev["rules_ref"] else ""
     images = gitlocal.changed_images(repo_dir, diff, ref=ev["head"])
 
@@ -288,6 +323,8 @@ def run(*, repo_dir: str = ".", provider: str | None = None, model: str | None =
                             images=images, limits=limits, fallback=fallback)
     if ev.get("via_pr_reason"):
         verdict["meta"]["via_pr"] = ev["via_pr_reason"]
+    if ev.get("catchup"):
+        verdict["meta"]["catchup"] = ev["catchup"]
     apply_bypass(verdict, ev, allow=allow_bypass, repo_dir=repo_dir)
 
     with open("review-gate-verdict.json", "w", encoding="utf-8") as fh:
